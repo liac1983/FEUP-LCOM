@@ -1,15 +1,10 @@
+#ifndef _LCOM_MOUSE_H_
+#define _LCOM_MOUSE_H_
+
+#include <minix/sysutil.h>
 #include <lcom/lcf.h>
-
-#include <stdint.h>
-#include <stdio.h>
-
 #include "i8042.h"
-#include "utils4.h"
-#include "statemachine.h"
-
-bool (check_input_buffer)();
-
-bool (check_output_buffer)();
+#include "KBC.h"
 
 int (mouse_subscribe_int)(uint8_t *bit_no);
 
@@ -17,16 +12,10 @@ int (mouse_unsubscribe_int)();
 
 void (mouse_ih)();
 
-void (buildPacket)(struct packet * pacote);
+void (mouse_sync_bytes)();
 
-int (mouse_enable_data_report)();
+void (mouse_bytes_to_packet)();
 
-int (mouse_disable_data_report)();
+int (mouse_write)(uint8_t command);
 
-int(mouse_write_cmd)(uint32_t cmd, uint8_t *resp);
-
-int (mouse_stream)();
-
-int (mouse_remote)();
-
-int (mouse_read_data)();
+#endif

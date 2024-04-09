@@ -5,143 +5,106 @@
 
 #include "i8254.h"
 
-static int hook_id;
-unsigned int counter = 0;
+int hook_id_TIMER = 0;
+int timer_counter = 0;
 
 int (timer_set_frequency)(uint8_t timer, uint32_t freq) {
-  /*
-    Como queremos um número de 16 bits, se freq for menor que 19, TIMER_FREQ / freq vai dar um número que é maior que o máximo representável em 16 bits (2^16 = 65536), logo, freq deve ser maior que 19, e menor que o valor de TIMER_FREQ.
-  */
-  if (freq > TIMER_FREQ || freq < 19)
+
+  if (freq < 19 || freq > TIMER_FREQ) return 1;
+
+  uint8_t controlWord;
+
+  if (timer_get_conf(timer, &controlWord) != 0)
     return 1;
 
-  uint16_t init = TIMER_FREQ / freq; //Obter LSB+MSB novo
-  uint8_t initmsb = 0, initlsb = 0;
-  util_get_LSB(init, &initlsb);
-  util_get_MSB(init, &initmsb);
+  controlWord = (controlWord & 0x0F) | TIMER_LSB_MSB; 
 
-  uint8_t conf = 0;
-  if (timer_get_conf(timer, &conf) != 0) {return 1;}
+  uint32_t initialValue = TIMER_FREQ / freq;
+  uint8_t MSB, LSB;
+  util_get_MSB(initialValue, &MSB);
+  util_get_LSB(initialValue, &LSB);
 
-  //Guardar os 4 LSB e colocar no modo LSB followed by MSB
-  conf = (conf & (TIMER_BCD | TIMER_SQR_WAVE | BIT(3))) | TIMER_LSB_MSB;
-  
-  if (timer == 0) {
-    conf = conf | TIMER_SEL0;
-
-    if(sys_outb(TIMER_CTRL, conf) != 0) {return 2;}
-    if(sys_outb(TIMER_0, initlsb) != 0) {return 2;}
-    if(sys_outb(TIMER_0, initmsb) != 0) {return 2;}
-
-    return 0;
+  uint8_t selectedTimer; // vai conter a porta do timer selecionado
+  switch (timer) {  
+    case 0: 
+      controlWord |= TIMER_SEL0;
+      selectedTimer = TIMER_0;
+      break;
+    case 1:
+      controlWord |= TIMER_SEL1;
+      selectedTimer = TIMER_1;
+      break;
+    case 2:
+      controlWord |= TIMER_SEL2;
+      selectedTimer = TIMER_2;
+      break;
   }
-  else if (timer == 1) {
-    conf = conf | TIMER_SEL1;
 
-    if(sys_outb(TIMER_CTRL, conf) != 0) {return 2;}
-    if(sys_outb(TIMER_1, initlsb) != 0) {return 2;}
-    if(sys_outb(TIMER_1, initmsb) != 0) {return 2;}
-
-    return 0;
-  }
-  else if (timer == 2) {
-    conf = conf | TIMER_SEL2;
-
-    if(sys_outb(TIMER_CTRL, conf) != 0) {return 2;}
-    if(sys_outb(TIMER_2, initlsb) != 0) {return 2;}
-    if(sys_outb(TIMER_2, initmsb) != 0) {return 2;}
-
-    return 0;
-  }
-  
-  return 1;
+  // modifica o valor inicial do contador ao mesmo tempo que indica se houve complicações em qualquer um destes passos
+  return sys_outb(TIMER_CTRL, controlWord) | sys_outb(selectedTimer, LSB) | sys_outb(selectedTimer, MSB);
 }
 
-int (timer_subscribe_int)(uint8_t *bit_no) {
-  hook_id = 0;
-  *bit_no = hook_id;
-  if (sys_irqsetpolicy(TIMER0_IRQ, IRQ_REENABLE, &hook_id) != 0) {return 1;}
 
-  return 0;
+int (timer_subscribe_int)(uint8_t *bit_no) {
+  if(bit_no == NULL)
+    return 1;
+  
+  *bit_no = BIT(hook_id_TIMER);
+  
+  return sys_irqsetpolicy(TIMER0_IRQ, IRQ_REENABLE,&hook_id_TIMER);
 }
 
 int (timer_unsubscribe_int)() {
-  if (sys_irqrmpolicy(&hook_id) != 0) {return 1;}
-
-  return 0;
+  return sys_irqrmpolicy(&hook_id_TIMER);
 }
 
 void (timer_int_handler)() {
-  counter++;
+  timer_counter++;
 }
 
+int (timer_get_conf)(uint8_t timer, uint8_t *st) {
 
-int (timer_display_conf)(uint8_t timer, uint8_t st,
-                        enum timer_status_field field) {
-  union timer_status_field_val tsf_union;
+  if (st == NULL || timer > 2 || timer < 0) return 1;
 
-  if (field == tsf_all)
-  {
-    tsf_union.byte = st;
+  uint8_t RBC = (TIMER_RB_CMD | TIMER_RB_COUNT_ | TIMER_RB_SEL(timer));
+  if(sys_outb(TIMER_CTRL, RBC))
+    return 1; 
+  return util_sys_inb(TIMER_0 + timer, st);
+}
+
+int (timer_display_conf)(uint8_t timer, uint8_t st, enum timer_status_field field) {
+
+  union timer_status_field_val data;
+
+  switch (field) {
+
+    case tsf_all: data.byte = st; break;
+    case tsf_initial:                                       
+      st = (st >> 4) & 0x03;
+ 
+      if (st == 1) data.in_mode = LSB_only;
+      else if (st == 2) data.in_mode = MSB_only;
+      else if (st == 3) data.in_mode = MSB_after_LSB;
+      else data.in_mode = INVAL_val;
+      
+      break;
+
+    case tsf_mode:
+      st = (st >> 1) & 0x07;
+
+      if(st == 6) data.count_mode = 2;
+      else if(st == 7) data.count_mode = 3;
+      else data.count_mode = st;
+
+      break;
+    
+    case tsf_base:
+      data.bcd = st & TIMER_BCD;
+      break;        
+
+    default:
+      return 1;
   }
 
-  else if (field == tsf_initial)
-  {
-    tsf_union.in_mode = st;
-
-    if ((st & TIMER_LSB) == 0)
-      if ((st & TIMER_MSB) == 0)
-        tsf_union.count_mode = INVAL_val;
-      else
-        tsf_union.count_mode = MSB_only;
-    else
-      if ((st & TIMER_MSB) == 0)
-        tsf_union.count_mode = LSB_only;
-      else
-        tsf_union.count_mode = MSB_after_LSB;
-  }
-
-  else if (field == tsf_mode)
-  {
-    tsf_union.count_mode = st;
-
-    int x = st & (TIMER_SQR_WAVE | BIT(3));
-
-    switch (x)
-    {
-      case 0:
-        tsf_union.count_mode = 0; break;
-      case 2:
-        tsf_union.count_mode = 1; break;
-      case 4:
-        tsf_union.count_mode = 2; break;
-      case 6:
-        tsf_union.count_mode = 3; break;
-      case 8:
-        tsf_union.count_mode = 4; break;
-      case 10:
-        tsf_union.count_mode = 5; break;
-      case 12:
-        tsf_union.count_mode = 2; break;
-      case 14:
-        tsf_union.count_mode = 3; break;
-      default:
-        return 1;
-        break;
-    }
-  }
-
-  else if (field == tsf_base)
-  {
-    tsf_union.bcd = st;
-
-    if ((st & TIMER_BCD) == 0)
-      tsf_union.bcd = false;
-    else
-      tsf_union.bcd = true;
-  }
-
-  if (timer_print_config(timer, field, tsf_union) != 0) {return 1;}
-
-  return 0;
+  return timer_print_config(timer, field, data);
 }
